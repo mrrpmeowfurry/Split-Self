@@ -7,6 +7,16 @@ import java.util.List;
 
 public class BrowserHistoryReader {
 
+    static {
+        // register bundle SQLite driver under Fabric isolated classloader.
+        // the JDBC ServiceLoader auto-discovery doesn't always run, which cause "No suitable driver for jdbc:sqlite:"
+        try {
+            Class.forName("org.sqlite.JDBC");
+        } catch (ClassNotFoundException e) {
+            System.err.println("SQLite JDBC driver not found on classpath: " + e.getMessage());
+        }
+    }
+
     public static class HistoryEntry {
         public String url;
         public String title;
@@ -53,12 +63,6 @@ public class BrowserHistoryReader {
         history.addAll(braveEntries);
         history.addAll(firefoxEntries);
         history.addAll(operaEntries);
-
-        if (!history.isEmpty()) {
-            for (int i = 0; i < Math.min(5, history.size()); i++) {
-                HistoryEntry entry = history.get(i);
-            }
-        }
 
         history.sort((a, b) -> Integer.compare(b.visitCount, a.visitCount));
 
@@ -226,6 +230,19 @@ public class BrowserHistoryReader {
         }
     }
 
+    // return first candidate path that exist, trying each in order
+    // (e.g. native install location then flatpak one)
+    
+    // fallback to first cadidate path if non exist to log as "not found".
+    private String flatpakCheck(String... candidates) {
+        for (String candidate : candidates) {
+            if (candidate != null && new File(candidate).exists()) {
+                return candidate;
+            }
+        }
+        return candidates.length > 0 ? candidates[0] : null;
+    }
+
     private String getChromeHistoryPath() {
         String os = System.getProperty("os.name").toLowerCase();
         String userHome = System.getProperty("user.home");
@@ -235,7 +252,10 @@ public class BrowserHistoryReader {
         } else if (os.contains("mac")) {
             return userHome + "/Library/Application Support/Google/Chrome/Default/History";
         } else {
-            return userHome + "/.config/google-chrome/Default/History";
+            return flatpakCheck(
+                userHome + "/.config/google-chrome/Default/History",
+                userHome + "/.var/app/com.google.Chrome/config/google-chrome/Default/History"
+            );
         }
     }
 
@@ -248,7 +268,10 @@ public class BrowserHistoryReader {
         } else if (os.contains("mac")) {
             return userHome + "/Library/Application Support/BraveSoftware/Brave-Browser/Default/History";
         } else {
-            return userHome + "/.config/BraveSoftware/Brave-Browser/Default/History";
+            return flatpakCheck(
+                userHome + "/.config/BraveSoftware/Brave-Browser/Default/History",
+                userHome + "/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/Default/History"
+            );
         }
     }
 
@@ -261,33 +284,43 @@ public class BrowserHistoryReader {
         } else if (os.contains("mac")) {
             return userHome + "/Library/Application Support/com.operasoftware.OperaGX/History";
         } else {
-            return userHome + "/.config/opera-gx/History";
+            return flatpakCheck(
+                userHome + "/.config/opera-gx/History",
+                // i'm not sure about OperaGX history path, someone please facts check this
+                userHome + "/.var/app/com.opera.opera-gx/config/opera-gx/History"
+            );
         }
     }
 
     private String getFirefoxHistoryPath() {
         String os = System.getProperty("os.name").toLowerCase();
         String userHome = System.getProperty("user.home");
-        String profilesPath = "";
 
+        String[] profilesPaths;
         if (os.contains("win")) {
-            profilesPath = userHome + "/AppData/Roaming/Mozilla/Firefox/Profiles";
+            profilesPaths = new String[]{userHome + "/AppData/Roaming/Mozilla/Firefox/Profiles"};
         } else if (os.contains("mac")) {
-            profilesPath = userHome + "/Library/Application Support/Firefox/Profiles";
+            profilesPaths = new String[]{userHome + "/Library/Application Support/Firefox/Profiles"};
         } else {
-            profilesPath = userHome + "/.mozilla/firefox";
+            // native install, then Flatpak
+            profilesPaths = new String[]{
+                userHome + "/.mozilla/firefox",
+                userHome + "/.var/app/org.mozilla.firefox/.mozilla/firefox"
+            };
         }
 
-        File profilesDir = new File(profilesPath);
-        if (profilesDir.exists() && profilesDir.isDirectory()) {
-            File[] profiles = profilesDir.listFiles();
-            if (profiles != null) {
-                for (File profile : profiles) {
-                    if (profile.isDirectory() &&
-                            (profile.getName().contains("default") || profile.getName().contains("release"))) {
-                        File placesFile = new File(profile, "places.sqlite");
-                        if (placesFile.exists()) {
-                            return placesFile.getAbsolutePath();
+        for (String profilesPath : profilesPaths) {
+            File profilesDir = new File(profilesPath);
+            if (profilesDir.exists() && profilesDir.isDirectory()) {
+                File[] profiles = profilesDir.listFiles();
+                if (profiles != null) {
+                    for (File profile : profiles) {
+                        if (profile.isDirectory() &&
+                                (profile.getName().contains("default") || profile.getName().contains("release"))) {
+                            File placesFile = new File(profile, "places.sqlite");
+                            if (placesFile.exists()) {
+                                return placesFile.getAbsolutePath();
+                            }
                         }
                     }
                 }
@@ -308,6 +341,10 @@ public class BrowserHistoryReader {
     }
 
     private String replaceTitle(String title) {
+        if (title == null) {
+            return null;
+        }
+        
         title = title.toLowerCase().contains("inbox (") ? "Email" : title;
         title = title.toLowerCase().contains("amazon") ? "Amazon" : title;
         title = title.toLowerCase().contains("youtube") ? "YouTube" : title;
